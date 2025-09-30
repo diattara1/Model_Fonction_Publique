@@ -1,3 +1,4 @@
+#api/main.py
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -55,19 +56,19 @@ async def root():
 
 @app.post("/query")
 async def query_endpoint(request: QueryRequest):
-    """Synchronous query endpoint"""
-    try:
-        response_parts = []
-        async for token in generator.generate_stream(
-            request.question, 
-            request.max_tokens, 
-            request.temperature
-        ):
-            response_parts.append(token)
-        
-        return {"response": "".join(response_parts)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Streaming query endpoint"""
+    async def token_generator():
+        try:
+            async for token in generator.generate_stream(
+                request.question,
+                request.max_tokens,
+                request.temperature
+            ):
+                yield token
+        except Exception as e:
+            yield f"[ERROR] {str(e)}"
+    
+    return StreamingResponse(token_generator(), media_type="text/plain")
 
 @app.websocket("/ws/generate")
 async def websocket_generate(websocket: WebSocket):
