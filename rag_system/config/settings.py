@@ -10,18 +10,18 @@ class Settings(BaseSettings):
     # Document processing
     CHUNK_SIZE: int = 1500
     CHUNK_OVERLAP: int = 250
-    TOP_K: int = 5
-    MAX_STEPS: int = 3
+    TOP_K: int = 3
     
     # API Configuration
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     API_RELOAD: bool = True
     
+    # Paths
+    PDF_DIR: str = "data/pdf"
+    INDICES_DIR: str = "data/indices"
+    
     # Security
     CORS_ORIGINS: list = ["*"]
-    
-    class Config:
-        env_file = ".env"
 
 settings = Settings()

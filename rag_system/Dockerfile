@@ -19,6 +19,9 @@ RUN pip3 install -r requirements.txt
 # Copy application code
 COPY . .
 
+# Create data directories
+RUN mkdir -p data/pdf data/indices
+
 # Expose port
 EXPOSE 8000
 

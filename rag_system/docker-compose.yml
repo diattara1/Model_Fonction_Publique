@@ -9,7 +9,6 @@ services:
       - HF_TOKEN=${HF_TOKEN}
     volumes:
       - ./data:/app/data
-      - ./logs:/app/logs
     deploy:
       resources:
         reservations:
@@ -17,16 +16,4 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    restart: unless-stopped
-
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
-      - ./ssl:/etc/nginx/ssl
-    depends_on:
-      - rag-api
     restart: unless-stopped

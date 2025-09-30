@@ -1,15 +1,13 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Dict
 import asyncio
 import os
 from sentence_transformers import SentenceTransformer
 from config.settings import settings
-from models.document_processor import DocumentProcessor
-from models.rag_engine import RAGEngine
+from models.vectorizer import Vectorizer
+from models.generator import Generator
 
 # Initialize FastAPI app
 app = FastAPI(title="RAG System - Ministère de la Fonction Publique du Sénégal")
@@ -27,27 +25,28 @@ app.add_middleware(
 print("Loading embedding model...")
 embed_model = SentenceTransformer(settings.EMBED_MODEL_NAME).to("cuda")
 
-print("Loading document processor...")
-doc_processor = DocumentProcessor(embed_model)
+print("Initializing vectorizer...")
+vectorizer = Vectorizer()
 
-print("Loading documents...")
-doc_processor.load_documents("data/pdf")
+# Check if indices exist and load them, otherwise build them
+indices_path = settings.INDICES_DIR
+if os.path.exists(os.path.join(indices_path, "faiss.index")):
+    print("Loading existing indices...")
+    vectorizer.load_indices(indices_path)
+else:
+    print("Building indices from PDF directory...")
+    vectorizer.load_documents(settings.PDF_DIR)
+    vectorizer.build_indices()
+    vectorizer.save_indices(indices_path)
 
-print("Building indices...")
-doc_processor.build_indices()
-
-print("Loading RAG engine...")
-rag_engine = RAGEngine(doc_processor)
+print("Initializing generator...")
+generator = Generator(vectorizer)
 
 # Models
 class QueryRequest(BaseModel):
     question: str
     max_tokens: int = 512
     temperature: float = 0.1
-
-class ChatMessage(BaseModel):
-    message: str
-    sender: str
 
 # Routes
 @app.get("/")
@@ -58,10 +57,8 @@ async def root():
 async def query_endpoint(request: QueryRequest):
     """Synchronous query endpoint"""
     try:
-        # This is a simplified version - in production, you'd want to handle this differently
-        # For streaming, use the WebSocket endpoint
         response_parts = []
-        async for token in rag_engine.generate_stream(
+        async for token in generator.generate_stream(
             request.question, 
             request.max_tokens, 
             request.temperature
@@ -72,8 +69,8 @@ async def query_endpoint(request: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket):
+@app.websocket("/ws/generate")
+async def websocket_generate(websocket: WebSocket):
     await websocket.accept()
     
     try:
@@ -86,7 +83,7 @@ async def websocket_chat(websocket: WebSocket):
                 continue
             
             # Send response tokens as they arrive
-            async for token in rag_engine.generate_stream(question):
+            async for token in generator.generate_stream(question):
                 await websocket.send_json({
                     "type": "token",
                     "data": token
@@ -97,9 +94,38 @@ async def websocket_chat(websocket: WebSocket):
     except Exception as e:
         await websocket.send_json({"error": str(e)})
 
+@app.post("/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    """Upload and process a new PDF document"""
+    try:
+        # Save uploaded file
+        file_path = os.path.join(settings.PDF_DIR, file.filename)
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        # Add document to vectorizer
+        vectorizer.add_document(file_path)
+        
+        # Save updated indices
+        vectorizer.save_indices(settings.INDICES_DIR)
+        
+        return {"message": f"PDF {file.filename} uploaded and indexed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "model_loaded": True}
+
+@app.get("/documents")
+async def list_documents():
+    """List all indexed documents"""
+    unique_sources = set()
+    for chunk in vectorizer.chunks:
+        unique_sources.add(chunk["source"])
+    
+    return {"documents": list(unique_sources)}
 
 if __name__ == "__main__":
     import uvicorn
