@@ -234,167 +234,156 @@
     </style>
 </head>
 <body>
-    <div class="chat-container">
-        <div class="chat-header">
-            <h1>🏛️ Assistant Fonction Publique</h1>
-            <p>Posez vos questions sur la fonction publique du Sénégal</p>
-        </div>
-
-        <div class="chat-messages" id="chatMessages">
-            <div class="message assistant">
-                <div class="message-content">
-                    Bonjour ! Je suis votre assistant pour la fonction publique du Sénégal. Comment puis-je vous aider aujourd'hui ?
-                </div>
-            </div>
-        </div>
-
-        <div class="chat-input-container">
-            <input 
-                type="text" 
-                class="chat-input" 
-                id="userInput" 
-                placeholder="Posez votre question..."
-                autocomplete="off"
-            >
-            <button class="send-button" id="sendButton">Envoyer</button>
-        </div>
+  <div class="chat-container">
+    <div class="chat-header">
+      <h1>🏛️ Assistant Fonction Publique</h1>
+      <p>Posez vos questions sur la fonction publique du Sénégal</p>
     </div>
 
-    <script>
-        const chatMessages = document.getElementById('chatMessages');
-        const userInput = document.getElementById('userInput');
-        const sendButton = document.getElementById('sendButton');
-        
-        const API_URL = 'https://czxkcipxf5x6iv-8000.proxy.runpod.net/query';
-        let isGenerating = false;
+    <div class="chat-messages" id="chatMessages">
+      <div class="message assistant">
+        <div class="message-content">
+          Bonjour ! Je suis votre assistant pour la fonction publique du Sénégal. Comment puis-je vous aider aujourd'hui ?
+        </div>
+      </div>
+    </div>
 
-        function addMessage(content, isUser = false) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
-            
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            contentDiv.innerHTML = content;
-            
-            messageDiv.appendChild(contentDiv);
-            chatMessages.appendChild(messageDiv);
+    <div class="chat-input-container">
+      <input 
+        type="text" 
+        class="chat-input" 
+        id="userInput" 
+        placeholder="Posez votre question..."
+        autocomplete="off"
+      >
+      <button class="send-button" id="sendButton">Envoyer</button>
+    </div>
+  </div>
+
+  <script>
+    const chatMessages = document.getElementById('chatMessages');
+    const userInput = document.getElementById('userInput');
+    const sendButton = document.getElementById('sendButton');
+
+    // 👉 Mets l’URL de ton API WebSocket ici
+        const WS_URL = "wss://czxkcipxf5x6iv-8000.proxy.runpod.net/ws/generate";
+    let ws;
+    let isGenerating = false;
+    let assistantDiv = null;
+    let sourcesDiv = null;
+    let loadingDiv = null;
+
+    function addMessage(content, isUser = false) {
+      const messageDiv = document.createElement('div');
+      messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
+      
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'message-content';
+      contentDiv.innerHTML = content;
+      
+      messageDiv.appendChild(contentDiv);
+      chatMessages.appendChild(messageDiv);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+      
+      return contentDiv;
+    }
+
+    function addLoadingIndicator() {
+      const loadingDiv = addMessage('', false);
+      loadingDiv.innerHTML = `
+        <div class="loading-indicator">
+          🔍 Recherche en cours
+          <div class="loading-dots">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      `;
+      return loadingDiv;
+    }
+
+    function connectWS() {
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => console.log("✅ Connecté au serveur WebSocket");
+
+      ws.onmessage = (event) => {
+        const msg = event.data;
+
+        if (msg.includes("📚 Recherche")) {
+          // on affiche loading
+          if (!loadingDiv) {
+            loadingDiv = addLoadingIndicator();
+          }
+        } 
+        else if (msg.includes("✅ Fin de réponse")) {
+          if (loadingDiv) {
+            loadingDiv.parentElement.remove();
+            loadingDiv = null;
+          }
+          isGenerating = false;
+          sendButton.disabled = false;
+          userInput.disabled = false;
+          userInput.focus();
+        } 
+        else if (msg.startsWith("📚 Sources:")) {
+          // Bloc sources séparé
+          if (assistantDiv) {
+            sourcesDiv = document.createElement('div');
+            sourcesDiv.className = 'sources';
+            sourcesDiv.innerHTML = "<strong>" + msg + "</strong>";
+            assistantDiv.appendChild(sourcesDiv);
             chatMessages.scrollTop = chatMessages.scrollHeight;
-            
-            return contentDiv;
+          }
         }
-
-        function addLoadingIndicator() {
-            const loadingDiv = addMessage('', false);
-            loadingDiv.innerHTML = `
-                <div class="loading-indicator">
-                    🔍 Recherche en cours
-                    <div class="loading-dots">
-                        <span></span>
-                        <span></span>
-                        <span></span>
-                    </div>
-                </div>
-            `;
-            return loadingDiv;
+        else {
+          // si première réponse token → retirer loading et init assistantDiv
+          if (loadingDiv) {
+            loadingDiv.parentElement.remove();
+            loadingDiv = null;
+            assistantDiv = addMessage('', false);
+          }
+          if (assistantDiv) {
+            assistantDiv.innerHTML += msg.replace(/\n/g, '<br>');
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+          }
         }
+      };
 
-        async function sendMessage() {
-            const question = userInput.value.trim();
-            if (!question || isGenerating) return;
+      ws.onclose = () => console.log("🔌 Déconnecté du serveur");
+      ws.onerror = (e) => console.error("❌ Erreur WS:", e);
+    }
 
-            // Add user message
-            addMessage(question, true);
-            userInput.value = '';
-            
-            // Disable input
-            isGenerating = true;
-            sendButton.disabled = true;
-            userInput.disabled = true;
+    function sendMessage() {
+      const question = userInput.value.trim();
+      if (!question || isGenerating) return;
 
-            // Add loading indicator
-            const loadingDiv = addLoadingIndicator();
+      addMessage(question, true);
+      userInput.value = '';
 
-            try {
-                const response = await fetch(API_URL, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        question: question,
-                        max_tokens: 512,
-                        temperature: 0.1
-                    })
-                });
+      isGenerating = true;
+      sendButton.disabled = true;
+      userInput.disabled = true;
 
-                if (!response.ok) {
-                    throw new Error(`Erreur HTTP: ${response.status}`);
-                }
+      ws.send(question);
+    }
 
-                // Remove loading indicator
-                loadingDiv.parentElement.remove();
+    // Event listeners
+    sendButton.addEventListener('click', sendMessage);
+    userInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
 
-                // Create assistant message container
-                const assistantDiv = addMessage('', false);
-                let fullResponse = '';
-                let isFirstToken = true;
-
-                // Read the stream
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    
-                    if (done) break;
-                    
-                    const chunk = decoder.decode(value, { stream: true });
-                    
-                    // If it's the first token, clear any loading state
-                    if (isFirstToken) {
-                        assistantDiv.innerHTML = '';
-                        isFirstToken = false;
-                    }
-                    
-                    fullResponse += chunk;
-                    
-                    // Format the response (preserve line breaks, highlight sources)
-                    let formattedResponse = fullResponse
-                        .replace(/\n/g, '<br>')
-                        .replace(/(📚 Sources:.*)/g, '<div class="sources"><strong>$1</strong></div>');
-                    
-                    assistantDiv.innerHTML = formattedResponse;
-                    chatMessages.scrollTop = chatMessages.scrollHeight;
-                }
-
-            } catch (error) {
-                console.error('Erreur:', error);
-                loadingDiv.innerHTML = `
-                    <div class="error-message">
-                        ❌ Erreur: ${error.message}
-                        <br><small>Vérifiez que l'API est bien lancée sur https://cwg1vcnomxknfp-8080.proxy.runpod.net</small>
-                    </div>
-                `;
-            } finally {
-                isGenerating = false;
-                sendButton.disabled = false;
-                userInput.disabled = false;
-                userInput.focus();
-            }
-        }
-
-        // Event listeners
-        sendButton.addEventListener('click', sendMessage);
-        
-        userInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
-
-        // Focus input on load
-        userInput.focus();
-    </script>
+    // Auto-connect on load
+    connectWS();
+    userInput.focus();
+  </script>
 </body>
 </html>
+
+
+   

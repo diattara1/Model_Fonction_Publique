@@ -1,20 +1,15 @@
-#api/main
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, File, UploadFile
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict
 import asyncio
-import os
-from sentence_transformers import SentenceTransformer
-from config.settings import settings
+
 from models.vectorizer import Vectorizer
 from models.generator import Generator
-from fastapi.responses import StreamingResponse
+from config.settings import settings
 
-# Initialize FastAPI app
-app = FastAPI(title="RAG System - Ministère de la Fonction Publique du Sénégal")
+# --- Init FastAPI ---
+app = FastAPI()
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -23,130 +18,53 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize models
-print("Loading embedding model...")
-embed_model = SentenceTransformer(settings.EMBED_MODEL_NAME).to("cuda")
-
-print("Initializing vectorizer...")
+# --- Init RAG ---
 vectorizer = Vectorizer()
 
-# Check if indices exist and load them, otherwise build them
-indices_path = settings.INDICES_DIR
-if os.path.exists(os.path.join(indices_path, "faiss.index")):
-    print("Loading existing indices...")
-    vectorizer.load_indices(indices_path)
-else:
-    print("Building indices from PDF directory...")
+# Charger les indices pré-construits ou les reconstruire si besoin
+try:
+    vectorizer.load_indices(settings.INDICES_DIR)
+    print("✅ Indices chargés avec succès")
+except Exception as e:
+    print(f"⚠️ Impossible de charger les indices : {e}")
+    print("👉 Construction des indices depuis les PDF...")
     vectorizer.load_documents(settings.PDF_DIR)
     vectorizer.build_indices()
-    vectorizer.save_indices(indices_path)
+    vectorizer.save_indices(settings.INDICES_DIR)
 
-print("Initializing generator...")
 generator = Generator(vectorizer)
 
-# Models
-class QueryRequest(BaseModel):
-    question: str
-    max_tokens: int = 512
-    temperature: float = 0.1
 
-# Routes
-@app.get("/")
-async def root():
-    return {"message": "RAG System API - Ministère de la Fonction Publique du Sénégal"}
-
-
-from fastapi import FastAPI, Request
-from sse_starlette.sse import EventSourceResponse
-
-@app.post("/query")
-async def query_endpoint(request: QueryRequest):
-    """Streaming query endpoint avec SSE"""
-    async def event_generator():
-        try:
-            async for token in generator.generate_stream(
-                request.question,
-                request.max_tokens,
-                request.temperature
-            ):
-                # Envoyer immédiatement sans buffer
-                yield token
-                
-        except Exception as e:
-            yield f"[ERROR] {str(e)}"
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/plain",
-        headers={
-            'Cache-Control': 'no-cache, no-transform',
-            'X-Accel-Buffering': 'no',
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Transfer-Encoding': 'chunked',
-        }
-    )
+# === WebSocket streaming ===
 @app.websocket("/ws/generate")
 async def websocket_generate(websocket: WebSocket):
     await websocket.accept()
-    
     try:
         while True:
-            data = await websocket.receive_json()
-            question = data.get("question", "")
-            
+            question = (await websocket.receive_text()).strip()
             if not question:
-                await websocket.send_json({"error": "Question is required"})
+                await websocket.send_text("⚠️ Question vide")
                 continue
-            
-            # Send response tokens as they arrive
+
+            # --- notifier recherche ---
+            await websocket.send_text("📚 Recherche en cours...")
+
+            # --- exécution agent en streaming ---
             async for token in generator.generate_stream(question):
-                await websocket.send_json({
-                    "type": "token",
-                    "data": token
-                })
-                
+                await websocket.send_text(token)
+
+            await websocket.send_text("\n\n✅ Fin de réponse")
     except WebSocketDisconnect:
-        print("Client disconnected")
+        print("🔌 Client déconnecté")
     except Exception as e:
-        await websocket.send_json({"error": str(e)})
+        print(f"❌ Erreur WebSocket: {e}")
+        await websocket.send_text(f"Erreur: {str(e)}")
 
-@app.post("/upload_pdf")
-async def upload_pdf(file: UploadFile = File(...)):
-    """Upload and process a new PDF document"""
-    try:
-        # Save uploaded file
-        file_path = os.path.join(settings.PDF_DIR, file.filename)
-        with open(file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        
-        # Add document to vectorizer
-        vectorizer.add_document(file_path)
-        
-        # Save updated indices
-        vectorizer.save_indices(settings.INDICES_DIR)
-        
-        return {"message": f"PDF {file.filename} uploaded and indexed successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "model_loaded": True}
-
-@app.get("/documents")
-async def list_documents():
-    """List all indexed documents"""
-    unique_sources = set()
-    for chunk in vectorizer.chunks:
-        unique_sources.add(chunk["source"])
-    
-    return {"documents": list(unique_sources)}
-
+# === Lancement ===
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(
-        "api.main:app",
+        "main:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=settings.API_RELOAD
