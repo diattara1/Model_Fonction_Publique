@@ -1,6 +1,6 @@
-#models/vectorizer.py
 import os
 import pickle
+import time
 import numpy as np
 import faiss
 from rank_bm25 import BM25Okapi
@@ -18,6 +18,8 @@ class Vectorizer:
         self.faiss_index = None
         self.bm25 = None
         self.texts = []
+        self.tokenizer = None  # Will be set by the generator
+        self.model = None     # Will be set by the generator
         
         # Download required NLTK data
         nltk.download('punkt_tab', quiet=True)
@@ -114,17 +116,15 @@ class Vectorizer:
         if self.faiss_index is None or self.bm25 is None:
             raise ValueError("Indices not loaded. Call build_indices() or load_indices() first.")
         
-        # Semantic search
+        start_time = time.time()
         q_emb = self.embed_model.encode([query], normalize_embeddings=True)
         search_array = np.array(q_emb, dtype="float32")
         D, I = self.faiss_index.search(search_array, top_k)
         vec_indices = I[0].tolist()
-        
-        # Keyword search
+
         bm25_scores = self.bm25.get_scores(query.lower().split())
         top_bm25 = np.argsort(bm25_scores)[::-1][:top_k].tolist()
-        
-        # Combine results using Reciprocal Rank Fusion (RRF)
+
         candidates = set(vec_indices + top_bm25)
         scored = []
         for idx in candidates:
@@ -132,11 +132,11 @@ class Vectorizer:
             rank_bm = top_bm25.index(idx) + 1 if idx in top_bm25 else 1000
             rrf = 1/(60+rank_vec) + 1/(60+rank_bm)
             scored.append((rrf, idx))
-        
+
         scored.sort(key=lambda x: x[0], reverse=True)
         keep = [idx for _, idx in scored[:top_k]]
         result = [{**self.chunks[i], "idx": i} for i in keep]
-        
+        print(f"🔍 Search took {time.time() - start_time:.2f}s")
         return result
     
     def add_document(self, file_path: str):
@@ -184,3 +184,8 @@ class Vectorizer:
         self.bm25 = BM25Okapi(all_tokenized)
         
         print(f"Added {len(new_chunks)} new chunks from {file_path}")
+    
+    def _snippet(self, s: str, n=180) -> str:
+        """Extract a snippet from text"""
+        s = " ".join(s.split())
+        return s if len(s) <= n else s[:n] + "…"

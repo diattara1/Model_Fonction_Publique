@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     # Document processing
     CHUNK_SIZE: int = 1500
     CHUNK_OVERLAP: int = 250
-    TOP_K: int = 3
+    TOP_K: int = 5
+    MAX_STEPS: int = 3  # AJOUTÉ CETTE LIGNE
     
     # API Configuration
     API_HOST: str = "0.0.0.0"

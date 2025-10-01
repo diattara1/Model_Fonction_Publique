@@ -1,4 +1,4 @@
-#api/main.py
+#api/main
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,6 +9,7 @@ from sentence_transformers import SentenceTransformer
 from config.settings import settings
 from models.vectorizer import Vectorizer
 from models.generator import Generator
+from fastapi.responses import StreamingResponse
 
 # Initialize FastAPI app
 app = FastAPI(title="RAG System - Ministère de la Fonction Publique du Sénégal")
@@ -54,22 +55,36 @@ class QueryRequest(BaseModel):
 async def root():
     return {"message": "RAG System API - Ministère de la Fonction Publique du Sénégal"}
 
+
+from fastapi import FastAPI, Request
+from sse_starlette.sse import EventSourceResponse
+
 @app.post("/query")
 async def query_endpoint(request: QueryRequest):
-    """Streaming query endpoint"""
-    async def token_generator():
+    """Streaming query endpoint avec SSE"""
+    async def event_generator():
         try:
             async for token in generator.generate_stream(
                 request.question,
                 request.max_tokens,
                 request.temperature
             ):
+                # Envoyer immédiatement sans buffer
                 yield token
+                
         except Exception as e:
             yield f"[ERROR] {str(e)}"
     
-    return StreamingResponse(token_generator(), media_type="text/plain")
-
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/plain",
+        headers={
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no',
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Transfer-Encoding': 'chunked',
+        }
+    )
 @app.websocket("/ws/generate")
 async def websocket_generate(websocket: WebSocket):
     await websocket.accept()
