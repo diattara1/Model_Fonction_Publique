@@ -23,8 +23,7 @@ class Generator:
         self.vectorizer = vectorizer
         self.tokenizer = AutoTokenizer.from_pretrained(
             settings.LLM_MODEL_NAME,
-            trust_remote_code=True,
-            token=settings.HF_TOKEN
+            trust_remote_code=True
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             settings.LLM_MODEL_NAME,
