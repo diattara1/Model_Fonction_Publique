@@ -18,3 +18,4 @@ hf_transfer
 autoawq 
 langgraph
 accelerate
+hypercorn

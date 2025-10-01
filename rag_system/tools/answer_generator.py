@@ -6,12 +6,19 @@ class AnswerGenerator:
 
     async def stream_answer(self, question: str, docs: list[dict]):
         context = "\n\n".join(f"[{i+1}] {d['text']}" for i, d in enumerate(docs))
-        prompt = (
-            "Réponds à la question en 5 phrases maximum.\n"
-            "Inclue 1-2 citations EXACTES (entre guillemets) tirées des extraits.\n"
-            "Ajoute une ligne 'Sources: ...' listant fichier:page.\n\n"
-            f"Question:\n{question}\n\nExtraits:\n{context}\n\nRéponse:"
-        )
+        prompt = f"""
+Réponds en tant qu’assistant spécialisé Fonction publique du Sénégal.
+Appuie-toi EXCLUSIVEMENT sur les extraits ci-dessous. Max 5 phrases.
+Cite le texte pertinent entre guillemets. Si rien de précis, dis-le et propose une reformulation.
+
+Question: {question}
+
+Extraits:
+{context}
+
+Réponse:
+"""
+
 
         async for token in self.generator.stream_generate(prompt):
             yield token
