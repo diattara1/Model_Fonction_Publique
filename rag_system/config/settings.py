@@ -5,7 +5,6 @@ class Settings(BaseSettings):
     # Model configuration
     EMBED_MODEL_NAME: str = "Qwen/Qwen3-Embedding-0.6B"
     LLM_MODEL_NAME: str = "Qwen/Qwen3-14B-AWQ"
-    HF_TOKEN: str = os.getenv("HF_TOKEN", "")
     
     # Document processing
     CHUNK_SIZE: int = 1500

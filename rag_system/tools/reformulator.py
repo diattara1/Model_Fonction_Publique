@@ -1,3 +1,4 @@
+# tools/reformulator.py
 class Reformulator:
     def __init__(self, generator):
         self.generator = generator
