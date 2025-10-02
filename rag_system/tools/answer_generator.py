@@ -5,69 +5,72 @@ import threading
 from typing import List, Dict, Tuple
 from transformers import TextIteratorStreamer
 
-THINK_OPEN = "<think>"
-THINK_CLOSE = "</think>"
+from models.generator import THINK_OPEN, THINK_CLOSE
 
 class AnswerGenerator:
     """
     Génération finale basée sur des extraits (RAG).
-    - stream_answer(..., use_history=False) : comportement historique
-    - stream_answer(..., use_history=True)  : inclut l'historique LLM (multi-tour)
-    Filtrage des tokens <think> en streaming.
+    La fin de stream (STATUS_DONE) est gérée par l'AGENT, pas ici.
     """
 
     def __init__(self, generator):
-        self.gen = generator            # models.generator.Generator
+        self.gen = generator
         self.tok = generator.tokenizer
         self.model = generator.model
 
     def _scrub(self, text: str) -> str:
-        lower = text.lower()
-        if any(k in lower for k in ["ignore previous instructions", "system prompt", "prompt système", "<think>"]):
+        lower = (text or "").lower()
+        dangerous = [
+            "ignore previous instructions",
+            "system prompt",
+            "prompt système",
+            "reveal your instructions",
+        ]
+        if any(p in lower for p in dangerous):
             return "[Extrait neutralisé pour sécurité]"
         return text
 
     def _build_prompt(self, question: str, docs: List[Dict]) -> str:
-        context = "\n\n".join(f"[{i+1}] {self._scrub(d['text'])}" for i, d in enumerate(docs))
+        context = "\n\n".join(
+            f"[{i+1}] {self._scrub(d['text'])}"
+            for i, d in enumerate(docs)
+        )
         return (
-            "Tu es un assistant spécialisé dans la Fonction publique du Sénégal. "
+            "Tu es un assistant spécialisé dans la Fonction publique du Sénégal.\n"
             "Réponds en 5 phrases maximum, clairement et sans inventer.\n"
             "- Si tu cites un texte, mets la citation EXACTE entre guillemets.\n"
-            "- Utilise uniquement les extraits fournis (pas d'autres sources implicites).\n"
-            "- À la fin, ajoute une ligne '📚 Sources: fichier:page'.\n\n"
+            "- Utilise uniquement les extraits fournis (pas d'autres sources implicites).\n\n"
             f"Question:\n{question}\n\nExtraits:\n{context}\n\nRéponse:"
         )
 
-    async def stream_answer(self, question: str, docs: List[Dict], use_history: bool = False,
-                            max_new_tokens=512, temperature=0.1):
-        """
-        Stream de la réponse finale RAG.
-        - use_history = True → on injecte self.gen.history avant le user turn.
-        - À la fin, on ajoute la réponse + sources dans l'historique si use_history=True.
-        """
-        user_turn = self._build_prompt(question, docs)
+    async def stream_answer(
+        self,
+        question: str,
+        docs: List[Dict],
+        conv_id: int,
+        use_history: bool = True,
+        max_new_tokens: int = 512,
+        temperature: float = 0.1
+    ):
+        rag_prompt = self._build_prompt(question, docs)
+        messages = self.gen._messages(rag_prompt, conv_id if use_history else None)
+        inputs = self.gen._tokenize_messages(messages)
 
-        messages = [{"role": "system", "content": "Tu es un assistant spécialisé dans la Fonction publique du Sénégal."}]
-        if use_history and self.gen.history:
-            messages.extend(self.gen.history)
-        messages.append({"role": "user", "content": user_turn})
-
-        text = self.tok.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True
+        streamer = TextIteratorStreamer(
+            self.tok,
+            skip_prompt=True,
+            skip_special_tokens=True
         )
-        inputs = self.tok(text, return_tensors="pt").to(self.model.device)
 
-        streamer = TextIteratorStreamer(self.tok, skip_prompt=True, skip_special_tokens=True)
         kwargs = dict(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             do_sample=(temperature > 0.0),
             streamer=streamer,
+            bad_words_ids=self.gen._bad_words_ids(),
         )
+
         thread = threading.Thread(target=self.model.generate, kwargs=kwargs)
         thread.start()
 
@@ -84,20 +87,24 @@ class AnswerGenerator:
 
         thread.join()
 
-        # Ajouter les sources à la fin
-        sources = [f"{os.path.basename(d['source'])}:p.{d['page']+1}" for d in docs if 'source' in d and 'page' in d]
+        # Ajout propre des sources (UNE seule ligne, dédupliquée)
+        sources = [
+            f"{os.path.basename(d['source'])}:p.{d['page']+1}"
+            for d in docs
+            if 'source' in d and 'page' in d
+        ]
         if sources:
-            line = "📚 Sources: " + ", ".join(sorted(set(sources)))
-            collected_visible.append(f"\n\n{line}")
-            yield f"\n\n{line}"
+            uniq = ", ".join(sorted(set(sources)))
+            yield f"\n\n📚 Sources: {uniq}"
 
-        # MàJ de la mémoire si demandé
         if use_history:
-            final_text = "".join(collected_visible).strip()
-            self.gen.add_to_history("user", question)          # on enregistre la *vraie* question utilisateur
-            self.gen.add_to_history("assistant", final_text)   # réponse + sources
+            final_response = "".join(collected_visible).strip()
+            self.gen._save_message(conv_id, "user", question)
+            # on ajoute également la ligne sources si elle existe
+            if sources:
+                final_response = (final_response + f"\n\n📚 Sources: {uniq}").strip()
+            self.gen._save_message(conv_id, "assistant", final_response)
 
-    # --- filtre thinking en streaming ---
     def _filter_think_from_buffer(self, buf: str, in_think: bool) -> Tuple[str, str, bool]:
         out = []
         i = 0
@@ -114,7 +121,9 @@ class AnswerGenerator:
             else:
                 end = buf.find(THINK_CLOSE, i)
                 if end == -1:
-                    return ("".join(out), buf[i - len(THINK_OPEN):] if i - len(THINK_OPEN) >= 0 else buf, True)
+                    open_pos = buf.rfind(THINK_OPEN, 0, max(i, 0))
+                    keep_from = open_pos if open_pos != -1 else i
+                    return ("".join(out), buf[keep_from:], True)
                 else:
                     i = end + len(THINK_CLOSE)
                     in_think = False

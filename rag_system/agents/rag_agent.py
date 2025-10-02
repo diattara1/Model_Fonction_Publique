@@ -1,13 +1,31 @@
 # agents/rag_agent.py
+import json
 from tools.retriever import Retriever
-from tools.Judge import Judge
+from tools.judge import Judge
 from tools.reformulator import Reformulator
 from tools.answer_generator import AnswerGenerator
 from models.generator import Generator
+from models.generator import STATUS_RETRIEVAL_START, STATUS_DONE
 from models.vectorizer import Vectorizer
 
 
 class RAGAgent:
+    """
+    Agent RAG générique.
+
+    Pipeline :
+      1) Décider si une recherche documentaire est nécessaire (OUI/NON)
+         → via simple_answer (sans mémoire) : rien n’est enregistré
+      2) Si NON → génération directe (mémoire DB côté Generator)
+      3) Si OUI → RAG :
+         - émettre [[STATUS:RETRIEVAL_START]]
+         - récupérer des extraits
+         - juger la pertinence
+         - éventuelle reformulation (≤ 3)
+         - génération finale avec citations
+      4) Émettre [[STATUS:DONE]] une seule fois à la fin
+    """
+
     def __init__(self, vectorizer: Vectorizer, generator: Generator):
         self.retriever = Retriever(vectorizer)
         self.judge = Judge(generator)
@@ -15,89 +33,94 @@ class RAGAgent:
         self.answer_generator = AnswerGenerator(generator)
         self.generator = generator
 
-    async def answer(self, question: str, stream: bool = True):
-        """
-        Pipeline RAG LLM-based:
-        - Si pas besoin de recherche → réponse directe (multi-tour)
-        - Sinon → recherche + jugement + éventuelles reformulations
-        - Fallback: proposer reformulation utilisateur + réponse provisoire
-        """
-        # 👉 notifier le front que le modèle réfléchit
-        yield "🤔 Réflexion en cours…"
+    # -----------------------------
+    # Utilitaires
+    # -----------------------------
+    def _extract_question(self, raw_input: str) -> str:
+        try:
+            data = json.loads(raw_input)
+            return (data.get("text") or "").strip()
+        except (json.JSONDecodeError, AttributeError):
+            return (raw_input or "").strip()
 
-        need_retrieval = self._ask_need_retrieval(question)
+    def _ask_need_retrieval(self, question: str) -> bool:
+        """
+        IMPORTANT : on utilise simple_answer (pas *_mt) pour ne RIEN
+        enregistrer en DB et ne pas polluer l’historique utilisateur.
+        """
+        prompt = f"""Tu es un assistant dans le domaine juridique/administratif.
 
-        # === Cas 1 : Pas besoin de recherche ===
-        if not need_retrieval:
-            if stream:
-                # ✅ utilise la mémoire multi-tour
-                async for token in self.generator.stream_generate_mt(question):
-                    yield token
-            else:
-                yield self.generator.simple_answer_mt(question)
+Analyse la question suivante et réponds UNIQUEMENT par "OUI" ou "NON" :
+- OUI si une recherche documentaire (textes officiels) est nécessaire
+- NON sinon
+
+Question: "{question}"
+
+Réponse (OUI ou NON):"""
+        resp = self.generator.simple_answer(prompt, max_new_tokens=5, temperature=0.0)
+        return (resp or "").strip().upper().startswith("OUI")
+
+    # -----------------------------
+    # Main
+    # -----------------------------
+    async def answer(self, question: str, conv_id: int, stream: bool = True):
+        clean_question = self._extract_question(question)
+        if not clean_question:
+            yield "⚠️ Question vide"
+            yield STATUS_DONE
             return
 
-        # === Cas 2 : Recherche documentaire ===
-        yield "📚 Recherche en cours..."
-        current_q = question
+        need_retrieval = self._ask_need_retrieval(clean_question)
+
+        # === Cas 1 : sans recherche documentaire ===
+        if not need_retrieval:
+            if stream:
+                async for token in self.generator.stream_generate_mt(clean_question, conv_id):
+                    yield token
+            else:
+                yield self.generator.simple_answer_mt(clean_question, conv_id)
+            yield STATUS_DONE
+            return
+
+        # === Cas 2 : avec recherche documentaire (RAG) ===
+        yield STATUS_RETRIEVAL_START
+
+        current_q = clean_question
         last_docs = []
 
-        for step in range(3):  # max 3 reformulations
+        for _ in range(3):
             docs = self.retriever.search(current_q)
             last_docs = docs
             verdict = self.judge.evaluate(current_q, docs)
-            print("reformulation n:", step, " : ", current_q, " doc récupérés :", docs)
 
             if verdict == "PERTINENT":
-                # ✅ réponse finale RAG avec mémoire
                 async for token in self.answer_generator.stream_answer(
-                    current_q, docs, use_history=True
+                    current_q, docs, conv_id=conv_id, use_history=True
                 ):
                     yield token
+                yield STATUS_DONE
                 return
             else:
                 current_q = self.reformulator.reformulate(current_q, docs)
 
-        # === Cas 3 : Rien de parfaitement pertinent ===
+        # Rien de parfaitement pertinent mais des extraits existent
         if last_docs:
             fallback_prompt = f"""
-La question posée est : "{question}".
+La question posée est : "{clean_question}".
 
 Les extraits trouvés ne répondent pas exactement, mais peuvent être liés.
-Donne une réponse prudente et partielle basée uniquement sur ces extraits, 
-sans inventer ni sortir du domaine de la fonction publique.
-Termine par : "⚠️ Je n’ai pas trouvé de réponse parfaitement adaptée. Pouvez-vous reformuler votre question de façon plus précise ?"
+Réponds prudemment en te basant uniquement sur ces extraits, sans inventer :
 
-Extraits:
 {chr(10).join(f"- {d['text'][:400]}..." for d in last_docs[:3])}
-
-Réponse provisoire:
 """
             if stream:
-                async for token in self.generator.stream_generate_mt(fallback_prompt):
+                async for token in self.generator.stream_generate_mt(fallback_prompt, conv_id):
                     yield token
             else:
-                yield self.generator.simple_answer_mt(fallback_prompt)
+                yield self.generator.simple_answer_mt(fallback_prompt, conv_id)
+            yield STATUS_DONE
             return
 
-        # === Cas 4 : Rien trouvé du tout ===
-        yield "⚠️ Je n’ai rien trouvé de pertinent. Pouvez-vous préciser votre question ?"
-
-    def _ask_need_retrieval(self, question: str) -> bool:
-        """
-        Demande au LLM si une recherche documentaire est nécessaire
-        pour répondre correctement.
-        """
-        prompt = f"""
-Tu es un assistant **spécialisé dans la Fonction publique sénégalaise**. 
-Ton rôle est d’aider uniquement sur les questions juridiques, administratives et réglementaires liées à la fonction publique du Sénégal.
-
-La question suivante nécessite-t-elle de consulter des documents juridiques/administratifs 
-(pdfs, décrets, lois, statuts sénégalais) pour répondre correctement ?
-
-Question: "{question}"
-
-Réponds UNIQUEMENT par "OUI" ou "NON".
-"""
-        response = self.generator.simple_answer(prompt, max_new_tokens=3)
-        return response.strip().upper().startswith("OUI")
+        # Aucun document pertinent
+        yield "Je n'ai pas trouvé d'information pertinente dans mes documents. Pouvez-vous reformuler votre question ?"
+        yield STATUS_DONE

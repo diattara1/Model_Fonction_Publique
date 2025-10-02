@@ -1,74 +1,69 @@
-#api/main.py
+# api/main.py
 import uvicorn
+import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
+from api.database import init_db
+from api.routes import router
 
-from agents.rag_agent import RAGAgent 
+from config.settings import settings
 from models.generator import Generator
 from models.vectorizer import Vectorizer
-from config.settings import settings
+from agents.rag_agent import RAGAgent
 
-# --- Init FastAPI ---
 app = FastAPI()
+init_db()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Init RAG ---
-vectorizer = Vectorizer()
+app.include_router(router)
 
+# Vectorizer & Generator
+vectorizer = Vectorizer()
 try:
     vectorizer.load_indices(settings.INDICES_DIR)
     print("✅ Indices chargés avec succès")
 except Exception as e:
-    print(f"⚠️ Impossible de charger les indices : {e}")
-    print("👉 Construction des indices depuis les PDF...")
+    print(f"⚠️ Indices non chargés : {e}")
     vectorizer.load_documents(settings.PDF_DIR)
     vectorizer.build_indices()
     vectorizer.save_indices(settings.INDICES_DIR)
 
-# Generator n’a pas besoin de vectorizer
 generator = Generator()
-
-# 👉 agent orchestre tout
 agent = RAGAgent(vectorizer, generator)
 
-
-# === WebSocket streaming ===
 @app.websocket("/ws/generate")
 async def websocket_generate(websocket: WebSocket):
+    """
+    WebSocket pour génération streaming avec mémoire conversationnelle.
+    URL: ws://.../ws/generate?conv_id=123
+    """
+    conv_id = int(websocket.query_params.get("conv_id", "0"))
     await websocket.accept()
     try:
         while True:
-            question = (await websocket.receive_text()).strip()
-            if not question:
-                await websocket.send_text("⚠️ Question vide")
-                continue
-
-            # notifier recherche
-            await websocket.send_text("📚 Recherche en cours...")
-
-            # exécution agent en streaming
-            async for token in agent.answer(question, stream=True):
+            raw = await websocket.receive_text()
+            async for token in agent.answer(raw, conv_id=conv_id, stream=True):
                 await websocket.send_text(token)
-
-            await websocket.send_text("\n\n✅ Fin de réponse")
     except WebSocketDisconnect:
-        print("🔌 Client déconnecté")
+        # NE RIEN ÉCRIRE en DB à la déconnexion → aucun [[SESSION_BREAK]] ne fuitera
+        print(f"🔌 Client déconnecté (conv_id={conv_id})")
     except Exception as e:
         print(f"❌ Erreur WebSocket: {e}")
-        await websocket.send_text(f"Erreur: {str(e)}")
+        try:
+            await websocket.send_text(f"Erreur: {str(e)}")
+        except:
+            pass
 
-# === Lancement ===
 if __name__ == "__main__":
     uvicorn.run(
-        "main:app",
+        "api.main:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=settings.API_RELOAD
